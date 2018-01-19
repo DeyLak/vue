@@ -1175,7 +1175,7 @@ var Observer = function Observer (value) {
 Observer.prototype.walk = function walk (obj) {
   var keys = Object.keys(obj);
   for (var i = 0; i < keys.length; i++) {
-    defineReactive(obj, keys[i], obj[keys[i]]);
+    defineReactive(obj, keys[i]);
   }
 };
 
@@ -1258,6 +1258,9 @@ function defineReactive (
 
   // cater for pre-defined getter/setters
   var getter = property && property.get;
+  if (!getter && arguments.length === 2) {
+    val = obj[key];
+  }
   var setter = property && property.set;
 
   var childOb = !shallow && observe(val);
@@ -2996,6 +2999,8 @@ function processFor (el) {
   }
 }
 
+
+
 function parseFor (exp) {
   var inMatch = exp.match(forAliasRE);
   if (!inMatch) { return }
@@ -3318,8 +3323,19 @@ function checkForAliasModel (el, value) {
 function preTransformNode (el, options) {
   if (el.tag === 'input') {
     var map = el.attrsMap;
-    if (map['v-model'] && (map['v-bind:type'] || map[':type'])) {
-      var typeBinding = getBindingAttr(el, 'type');
+    if (!map['v-model']) {
+      return
+    }
+
+    var typeBinding;
+    if (map[':type'] || map['v-bind:type']) {
+      typeBinding = getBindingAttr(el, 'type');
+    }
+    if (!typeBinding && map['v-bind']) {
+      typeBinding = "(" + (map['v-bind']) + ").type";
+    }
+
+    if (typeBinding) {
       var ifCondition = getAndRemoveAttr(el, 'v-if', true);
       var ifConditionExtra = ifCondition ? ("&&(" + ifCondition + ")") : "";
       var hasElse = getAndRemoveAttr(el, 'v-else', true) != null;

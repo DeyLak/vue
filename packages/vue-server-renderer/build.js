@@ -489,45 +489,6 @@ function createTextVNode (val) {
 // used for static nodes and slot nodes because they may be reused across
 // multiple renders, cloning them avoids errors when DOM manipulations rely
 // on their elm reference.
-function cloneVNode (vnode, deep) {
-  var componentOptions = vnode.componentOptions;
-  var cloned = new VNode(
-    vnode.tag,
-    vnode.data,
-    vnode.children,
-    vnode.text,
-    vnode.elm,
-    vnode.context,
-    componentOptions,
-    vnode.asyncFactory
-  );
-  cloned.ns = vnode.ns;
-  cloned.isStatic = vnode.isStatic;
-  cloned.key = vnode.key;
-  cloned.isComment = vnode.isComment;
-  cloned.fnContext = vnode.fnContext;
-  cloned.fnOptions = vnode.fnOptions;
-  cloned.fnScopeId = vnode.fnScopeId;
-  cloned.isCloned = true;
-  if (deep) {
-    if (vnode.children) {
-      cloned.children = cloneVNodes(vnode.children, true);
-    }
-    if (componentOptions && componentOptions.children) {
-      componentOptions.children = cloneVNodes(componentOptions.children, true);
-    }
-  }
-  return cloned
-}
-
-function cloneVNodes (vnodes, deep) {
-  var len = vnodes.length;
-  var res = new Array(len);
-  for (var i = 0; i < len; i++) {
-    res[i] = cloneVNode(vnodes[i], deep);
-  }
-  return res
-}
 
 /*  */
 
@@ -1014,7 +975,7 @@ var Observer = function Observer (value) {
 Observer.prototype.walk = function walk (obj) {
   var keys = Object.keys(obj);
   for (var i = 0; i < keys.length; i++) {
-    defineReactive(obj, keys[i], obj[keys[i]]);
+    defineReactive(obj, keys[i]);
   }
 };
 
@@ -1097,6 +1058,9 @@ function defineReactive (
 
   // cater for pre-defined getter/setters
   var getter = property && property.get;
+  if (!getter && arguments.length === 2) {
+    val = obj[key];
+  }
   var setter = property && property.set;
 
   var childOb = !shallow && observe(val);
@@ -3621,6 +3585,8 @@ function processFor (el) {
   }
 }
 
+
+
 function parseFor (exp) {
   var inMatch = exp.match(forAliasRE);
   if (!inMatch) { return }
@@ -3943,8 +3909,19 @@ function checkForAliasModel (el, value) {
 function preTransformNode (el, options) {
   if (el.tag === 'input') {
     var map = el.attrsMap;
-    if (map['v-model'] && (map['v-bind:type'] || map[':type'])) {
-      var typeBinding = getBindingAttr(el, 'type');
+    if (!map['v-model']) {
+      return
+    }
+
+    var typeBinding;
+    if (map[':type'] || map['v-bind:type']) {
+      typeBinding = getBindingAttr(el, 'type');
+    }
+    if (!typeBinding && map['v-bind']) {
+      typeBinding = "(" + (map['v-bind']) + ").type";
+    }
+
+    if (typeBinding) {
       var ifCondition = getAndRemoveAttr(el, 'v-if', true);
       var ifConditionExtra = ifCondition ? ("&&(" + ifCondition + ")") : "";
       var hasElse = getAndRemoveAttr(el, 'v-else', true) != null;
@@ -5801,6 +5778,33 @@ var seenObjects = new _Set();
  * getters, so that every nested property inside the object
  * is collected as a "deep" dependency.
  */
+function traverse (val) {
+  _traverse(val, seenObjects);
+  seenObjects.clear();
+}
+
+function _traverse (val, seen) {
+  var i, keys;
+  var isA = Array.isArray(val);
+  if ((!isA && !isObject(val)) || Object.isFrozen(val)) {
+    return
+  }
+  if (val.__ob__) {
+    var depId = val.__ob__.dep.id;
+    if (seen.has(depId)) {
+      return
+    }
+    seen.add(depId);
+  }
+  if (isA) {
+    i = val.length;
+    while (i--) { _traverse(val[i], seen); }
+  } else {
+    keys = Object.keys(val);
+    i = keys.length;
+    while (i--) { _traverse(val[keys[i]], seen); }
+  }
+}
 
 if (process.env.NODE_ENV !== 'production') {
   var perf = inBrowser && window.performance;
@@ -6229,7 +6233,7 @@ function updateChildComponent (
   // update $attrs and $listeners hash
   // these are also reactive so they may trigger child update if the child
   // used them during render
-  vm.$attrs = (parentVnode.data && parentVnode.data.attrs) || emptyObject;
+  vm.$attrs = parentVnode.data.attrs || emptyObject;
   vm.$listeners = listeners || emptyObject;
 
   // update props
@@ -6247,11 +6251,11 @@ function updateChildComponent (
   }
 
   // update listeners
-  if (listeners) {
-    var oldListeners = vm.$options._parentListeners;
-    vm.$options._parentListeners = listeners;
-    updateComponentListeners(vm, listeners, oldListeners);
-  }
+  listeners = listeners || emptyObject;
+  var oldListeners = vm.$options._parentListeners;
+  vm.$options._parentListeners = listeners;
+  updateComponentListeners(vm, listeners, oldListeners);
+
   // resolve slots + force update if has children
   if (hasChildren) {
     vm.$slots = resolveSlots(renderChildren, parentVnode.context);
@@ -6447,8 +6451,11 @@ function _createElement (
     // direct component options / constructor
     vnode = createComponent(tag, data, context, children);
   }
-  if (isDef(vnode)) {
-    if (ns) { applyNS(vnode, ns); }
+  if (Array.isArray(vnode)) {
+    return vnode
+  } else if (isDef(vnode)) {
+    if (isDef(ns)) { applyNS(vnode, ns); }
+    if (isDef(data)) { registerDeepBindings(data); }
     return vnode
   } else {
     return createEmptyVNode()
@@ -6469,6 +6476,18 @@ function applyNS (vnode, ns, force) {
         applyNS(child, ns, force);
       }
     }
+  }
+}
+
+// ref #5318
+// necessary to ensure parent re-render when deep bindings like :style and
+// :class are used on slot nodes
+function registerDeepBindings (data) {
+  if (isObject(data.style)) {
+    traverse(data.style);
+  }
+  if (isObject(data.class)) {
+    traverse(data.class);
   }
 }
 
@@ -6655,11 +6674,9 @@ function renderStatic (
   var cached = this._staticTrees || (this._staticTrees = []);
   var tree = cached[index];
   // if has already-rendered static tree and not inside v-for,
-  // we can reuse the same tree by doing a shallow clone.
+  // we can reuse the same tree.
   if (tree && !isInFor) {
-    return Array.isArray(tree)
-      ? cloneVNodes(tree)
-      : cloneVNode(tree)
+    return tree
   }
   // otherwise, render a fresh tree.
   tree = cached[index] = this.$options.staticRenderFns[index].call(
@@ -6891,7 +6908,7 @@ function FunctionalRenderContext (
   if (options._scopeId) {
     this._c = function (a, b, c, d) {
       var vnode = createElement(contextVm, a, b, c, d, needNormalization);
-      if (vnode) {
+      if (vnode && !Array.isArray(vnode)) {
         vnode.fnScopeId = options._scopeId;
         vnode.fnContext = parent;
       }
@@ -6934,14 +6951,23 @@ function createFunctionalComponent (
   var vnode = options.render.call(null, renderContext._c, renderContext);
 
   if (vnode instanceof VNode) {
-    vnode.fnContext = contextVm;
-    vnode.fnOptions = options;
-    if (data.slot) {
-      (vnode.data || (vnode.data = {})).slot = data.slot;
+    setFunctionalContextForVNode(vnode, data, contextVm, options);
+    return vnode
+  } else if (Array.isArray(vnode)) {
+    var vnodes = normalizeChildren(vnode) || [];
+    for (var i = 0; i < vnodes.length; i++) {
+      setFunctionalContextForVNode(vnodes[i], data, contextVm, options);
     }
+    return vnodes
   }
+}
 
-  return vnode
+function setFunctionalContextForVNode (vnode, data, vm, options) {
+  vnode.fnContext = vm;
+  vnode.fnOptions = options;
+  if (data.slot) {
+    (vnode.data || (vnode.data = {})).slot = data.slot;
+  }
 }
 
 function mergeProps (to, from) {
@@ -6979,7 +7005,15 @@ var componentVNodeHooks = {
     parentElm,
     refElm
   ) {
-    if (!vnode.componentInstance || vnode.componentInstance._isDestroyed) {
+    if (
+      vnode.componentInstance &&
+      !vnode.componentInstance._isDestroyed &&
+      vnode.data.keepAlive
+    ) {
+      // kept-alive components, treat as a patch
+      var mountedNode = vnode; // work around flow
+      componentVNodeHooks.prepatch(mountedNode, mountedNode);
+    } else {
       var child = vnode.componentInstance = createComponentInstanceForVnode(
         vnode,
         activeInstance,
@@ -6987,10 +7021,6 @@ var componentVNodeHooks = {
         refElm
       );
       child.$mount(hydrating ? vnode.elm : undefined, hydrating);
-    } else if (vnode.data.keepAlive) {
-      // kept-alive components, treat as a patch
-      var mountedNode = vnode; // work around flow
-      componentVNodeHooks.prepatch(mountedNode, mountedNode);
     }
   },
 

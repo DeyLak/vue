@@ -766,8 +766,7 @@ function createTextVNode (val) {
 // used for static nodes and slot nodes because they may be reused across
 // multiple renders, cloning them avoids errors when DOM manipulations rely
 // on their elm reference.
-function cloneVNode (vnode, deep) {
-  var componentOptions = vnode.componentOptions;
+function cloneVNode (vnode) {
   var cloned = new VNode(
     vnode.tag,
     vnode.data,
@@ -775,7 +774,7 @@ function cloneVNode (vnode, deep) {
     vnode.text,
     vnode.elm,
     vnode.context,
-    componentOptions,
+    vnode.componentOptions,
     vnode.asyncFactory
   );
   cloned.ns = vnode.ns;
@@ -786,24 +785,7 @@ function cloneVNode (vnode, deep) {
   cloned.fnOptions = vnode.fnOptions;
   cloned.fnScopeId = vnode.fnScopeId;
   cloned.isCloned = true;
-  if (deep) {
-    if (vnode.children) {
-      cloned.children = cloneVNodes(vnode.children, true);
-    }
-    if (componentOptions && componentOptions.children) {
-      componentOptions.children = cloneVNodes(componentOptions.children, true);
-    }
-  }
   return cloned
-}
-
-function cloneVNodes (vnodes, deep) {
-  var len = vnodes.length;
-  var res = new Array(len);
-  for (var i = 0; i < len; i++) {
-    res[i] = cloneVNode(vnodes[i], deep);
-  }
-  return res
 }
 
 /*
@@ -890,7 +872,7 @@ var Observer = function Observer (value) {
 Observer.prototype.walk = function walk (obj) {
   var keys = Object.keys(obj);
   for (var i = 0; i < keys.length; i++) {
-    defineReactive(obj, keys[i], obj[keys[i]]);
+    defineReactive(obj, keys[i]);
   }
 };
 
@@ -973,6 +955,9 @@ function defineReactive (
 
   // cater for pre-defined getter/setters
   var getter = property && property.get;
+  if (!getter && arguments.length === 2) {
+    val = obj[key];
+  }
   var setter = property && property.set;
 
   var childOb = !shallow && observe(val);
@@ -2808,7 +2793,7 @@ function updateChildComponent (
   // update $attrs and $listeners hash
   // these are also reactive so they may trigger child update if the child
   // used them during render
-  vm.$attrs = (parentVnode.data && parentVnode.data.attrs) || emptyObject;
+  vm.$attrs = parentVnode.data.attrs || emptyObject;
   vm.$listeners = listeners || emptyObject;
 
   // update props
@@ -2826,11 +2811,11 @@ function updateChildComponent (
   }
 
   // update listeners
-  if (listeners) {
-    var oldListeners = vm.$options._parentListeners;
-    vm.$options._parentListeners = listeners;
-    updateComponentListeners(vm, listeners, oldListeners);
-  }
+  listeners = listeners || emptyObject;
+  var oldListeners = vm.$options._parentListeners;
+  vm.$options._parentListeners = listeners;
+  updateComponentListeners(vm, listeners, oldListeners);
+
   // resolve slots + force update if has children
   if (hasChildren) {
     vm.$slots = resolveSlots(renderChildren, parentVnode.context);
@@ -3829,11 +3814,9 @@ function renderStatic (
   var cached = this._staticTrees || (this._staticTrees = []);
   var tree = cached[index];
   // if has already-rendered static tree and not inside v-for,
-  // we can reuse the same tree by doing a shallow clone.
+  // we can reuse the same tree.
   if (tree && !isInFor) {
-    return Array.isArray(tree)
-      ? cloneVNodes(tree)
-      : cloneVNode(tree)
+    return tree
   }
   // otherwise, render a fresh tree.
   tree = cached[index] = this.$options.staticRenderFns[index].call(
@@ -3957,7 +3940,7 @@ function FunctionalRenderContext (
   if (options._scopeId) {
     this._c = function (a, b, c, d) {
       var vnode = createElement(contextVm, a, b, c, d, needNormalization);
-      if (vnode) {
+      if (vnode && !Array.isArray(vnode)) {
         vnode.fnScopeId = options._scopeId;
         vnode.fnContext = parent;
       }
@@ -4000,14 +3983,23 @@ function createFunctionalComponent (
   var vnode = options.render.call(null, renderContext._c, renderContext);
 
   if (vnode instanceof VNode) {
-    vnode.fnContext = contextVm;
-    vnode.fnOptions = options;
-    if (data.slot) {
-      (vnode.data || (vnode.data = {})).slot = data.slot;
+    setFunctionalContextForVNode(vnode, data, contextVm, options);
+    return vnode
+  } else if (Array.isArray(vnode)) {
+    var vnodes = normalizeChildren(vnode) || [];
+    for (var i = 0; i < vnodes.length; i++) {
+      setFunctionalContextForVNode(vnodes[i], data, contextVm, options);
     }
+    return vnodes
   }
+}
 
-  return vnode
+function setFunctionalContextForVNode (vnode, data, vm, options) {
+  vnode.fnContext = vm;
+  vnode.fnOptions = options;
+  if (data.slot) {
+    (vnode.data || (vnode.data = {})).slot = data.slot;
+  }
 }
 
 function mergeProps (to, from) {
@@ -4045,7 +4037,15 @@ var componentVNodeHooks = {
     parentElm,
     refElm
   ) {
-    if (!vnode.componentInstance || vnode.componentInstance._isDestroyed) {
+    if (
+      vnode.componentInstance &&
+      !vnode.componentInstance._isDestroyed &&
+      vnode.data.keepAlive
+    ) {
+      // kept-alive components, treat as a patch
+      var mountedNode = vnode; // work around flow
+      componentVNodeHooks.prepatch(mountedNode, mountedNode);
+    } else {
       var child = vnode.componentInstance = createComponentInstanceForVnode(
         vnode,
         activeInstance,
@@ -4053,10 +4053,6 @@ var componentVNodeHooks = {
         refElm
       );
       child.$mount(hydrating ? vnode.elm : undefined, hydrating);
-    } else if (vnode.data.keepAlive) {
-      // kept-alive components, treat as a patch
-      var mountedNode = vnode; // work around flow
-      componentVNodeHooks.prepatch(mountedNode, mountedNode);
     }
   },
 
@@ -4364,8 +4360,11 @@ function _createElement (
     // direct component options / constructor
     vnode = createComponent(tag, data, context, children);
   }
-  if (isDef(vnode)) {
-    if (ns) { applyNS(vnode, ns); }
+  if (Array.isArray(vnode)) {
+    return vnode
+  } else if (isDef(vnode)) {
+    if (isDef(ns)) { applyNS(vnode, ns); }
+    if (isDef(data)) { registerDeepBindings(data); }
     return vnode
   } else {
     return createEmptyVNode()
@@ -4386,6 +4385,18 @@ function applyNS (vnode, ns, force) {
         applyNS(child, ns, force);
       }
     }
+  }
+}
+
+// ref #5318
+// necessary to ensure parent re-render when deep bindings like :style and
+// :class are used on slot nodes
+function registerDeepBindings (data) {
+  if (isObject(data.style)) {
+    traverse(data.style);
+  }
+  if (isObject(data.class)) {
+    traverse(data.class);
   }
 }
 
@@ -4437,20 +4448,17 @@ function renderMixin (Vue) {
     var render = ref.render;
     var _parentVnode = ref._parentVnode;
 
-    if (vm._isMounted) {
-      // if the parent didn't update, the slot nodes will be the ones from
-      // last render. They need to be cloned to ensure "freshness" for this render.
+    // reset _rendered flag on slots for duplicate slot check
+    {
       for (var key in vm.$slots) {
-        var slot = vm.$slots[key];
-        // _rendered is a flag added by renderSlot, but may not be present
-        // if the slot is passed from manually written render functions
-        if (slot._rendered || (slot[0] && slot[0].elm)) {
-          vm.$slots[key] = cloneVNodes(slot, true /* deep */);
-        }
+        // $flow-disable-line
+        vm.$slots[key]._rendered = false;
       }
     }
 
-    vm.$scopedSlots = (_parentVnode && _parentVnode.data.scopedSlots) || emptyObject;
+    if (_parentVnode) {
+      vm.$scopedSlots = _parentVnode.data.scopedSlots || emptyObject;
+    }
 
     // set parent vnode. this allows render functions to have access
     // to the data on the placeholder node.
@@ -5438,7 +5446,25 @@ function createPatchFunction (backend) {
   }
 
   var creatingElmInVPre = 0;
-  function createElm (vnode, insertedVnodeQueue, parentElm, refElm, nested) {
+
+  function createElm (
+    vnode,
+    insertedVnodeQueue,
+    parentElm,
+    refElm,
+    nested,
+    ownerArray,
+    index
+  ) {
+    if (isDef(vnode.elm) && isDef(ownerArray)) {
+      // This vnode was used in a previous render!
+      // now it's used as a new node, overwriting its elm would cause
+      // potential patch errors down the road when it's used as an insertion
+      // reference node. Instead, we clone the node on-demand before creating
+      // associated DOM element for it.
+      vnode = ownerArray[index] = cloneVNode(vnode);
+    }
+
     vnode.isRootInsert = !nested; // for transition enter check
     if (createComponent(vnode, insertedVnodeQueue, parentElm, refElm)) {
       return
@@ -5461,6 +5487,7 @@ function createPatchFunction (backend) {
           );
         }
       }
+
       vnode.elm = vnode.ns
         ? nodeOps.createElementNS(vnode.ns, tag)
         : nodeOps.createElement(tag, vnode);
@@ -5566,7 +5593,7 @@ function createPatchFunction (backend) {
         checkDuplicateKeys(children);
       }
       for (var i = 0; i < children.length; ++i) {
-        createElm(children[i], insertedVnodeQueue, vnode.elm, null, true);
+        createElm(children[i], insertedVnodeQueue, vnode.elm, null, true, children, i);
       }
     } else if (isPrimitive(vnode.text)) {
       nodeOps.appendChild(vnode.elm, nodeOps.createTextNode(String(vnode.text)));
@@ -5619,7 +5646,7 @@ function createPatchFunction (backend) {
 
   function addVnodes (parentElm, refElm, vnodes, startIdx, endIdx, insertedVnodeQueue) {
     for (; startIdx <= endIdx; ++startIdx) {
-      createElm(vnodes[startIdx], insertedVnodeQueue, parentElm, refElm);
+      createElm(vnodes[startIdx], insertedVnodeQueue, parentElm, refElm, false, vnodes, startIdx);
     }
   }
 
@@ -5729,7 +5756,7 @@ function createPatchFunction (backend) {
           ? oldKeyToIdx[newStartVnode.key]
           : findIdxInOld(newStartVnode, oldCh, oldStartIdx, oldEndIdx);
         if (isUndef(idxInOld)) { // New element
-          createElm(newStartVnode, insertedVnodeQueue, parentElm, oldStartVnode.elm);
+          createElm(newStartVnode, insertedVnodeQueue, parentElm, oldStartVnode.elm, false, newCh, newStartIdx);
         } else {
           vnodeToMove = oldCh[idxInOld];
           if (sameVnode(vnodeToMove, newStartVnode)) {
@@ -5738,7 +5765,7 @@ function createPatchFunction (backend) {
             canMove && nodeOps.insertBefore(parentElm, vnodeToMove.elm, oldStartVnode.elm);
           } else {
             // same key but different element. treat as new element
-            createElm(newStartVnode, insertedVnodeQueue, parentElm, oldStartVnode.elm);
+            createElm(newStartVnode, insertedVnodeQueue, parentElm, oldStartVnode.elm, false, newCh, newStartIdx);
           }
         }
         newStartVnode = newCh[++newStartIdx];
